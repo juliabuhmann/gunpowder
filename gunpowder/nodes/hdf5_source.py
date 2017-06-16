@@ -21,15 +21,19 @@ class Hdf5Source(BatchProvider):
             datasets,
             points_types=None,
             points_rois=None,
+            volume_rois=None,
+            volume_phys_offset=None,
             resolution=None):
         '''Create a new Hdf5Source
 
         Args
-
             filename: The HDF5 file.
-
             datasets: Dictionary of VolumeType -> dataset names that this source offers.
-
+            volume_rois: Dictionary of VolumeType -> ROIs of corresponding volume. Overwrites offset stored in the HDF5
+            dataset.
+            volume_phys_offset: Dictionary of VolumeType -> Inherent offset of dataset, eg. if ground truth matrix is
+            smaller in shape than the raw matrix (padded), and a certain offset needs to be subtracted to align ground
+            truth matrix and raw matrix.
             resolution: tuple, to overwrite the resolution stored in the HDF5 datasets.
         '''
 
@@ -38,7 +42,14 @@ class Hdf5Source(BatchProvider):
 
         self.points_types      = points_types
         self.points_rois = points_rois
-
+        if volume_rois is None:
+            self.volume_rois = {}
+        else:
+            self.volume_rois = volume_rois
+        if volume_phys_offset is None:
+            self.volume_phys_offset = {}
+        else:
+            self.volume_phys_offset = volume_phys_offset
         self.specified_resolution = resolution
         self.resolutions = {}
 
@@ -54,8 +65,6 @@ class Hdf5Source(BatchProvider):
                 raise RuntimeError("%s not in %s"%(ds,self.filename))
 
             dims = f[ds].shape
-            # TODO: different volumes can have different offsets, needs to be added.
-            self.spec.volumes[volume_type] = Roi((0,)*len(dims), dims)
 
             if self.ndims is None:
                 self.ndims = len(dims)
@@ -74,6 +83,14 @@ class Hdf5Source(BatchProvider):
             else:
                 self.resolutions[volume_type] = self.specified_resolution
 
+            if volume_type not in self.volume_rois:
+                if 'offset' in f[ds].attrs:
+                    offset = f[ds].attrs['offset']/self.resolutions[volume_type]
+                else:
+                    offset = (0,) * len(dims)
+                self.spec.volumes[volume_type] = Roi(offset, dims)
+            else:
+                self.spec.volumes[volume_type] = self.volume_rois[volume_type]
 
         if self.points_types is not None:
             for points_type in self.points_types:
@@ -110,9 +127,14 @@ class Hdf5Source(BatchProvider):
                     VolumeType.ALPHA_MASK: True,
                 }[volume_type]
 
-                logger.debug("Reading %s in %s..."%(volume_type,roi))
+                if volume_type in self.volume_phys_offset:
+                    offset_shift = np.array(self.volume_phys_offset[volume_type])/np.array(self.resolutions[volume_type])
+                    roi_offset = roi.shift(tuple(-offset_shift))
+                else:
+                    roi_offset = roi
+                logger.debug("Reading %s in %s..."%(volume_type,roi_offset))
                 batch.volumes[volume_type] = Volume(
-                        self.__read(f, self.datasets[volume_type], roi),
+                        self.__read(f, self.datasets[volume_type], roi_offset),
                         roi=roi,
                         resolution=self.resolutions[volume_type],
                         interpolate=interpolate)
@@ -123,6 +145,7 @@ class Hdf5Source(BatchProvider):
                 assert request.points[PointsType.PRESYN] == request.points[PointsType.POSTSYN]
                 # Cremi specific, ROI offset corresponds to offset present in the
                 # synapse location relative to the raw data.
+                # TODO: Make this generic and in the same style as done for volume_phys_offst.
                 dataset_offset = self.get_spec().points[PointsType.PRESYN].get_offset()
                 presyn_points, postsyn_points = self.__get_syn_points(roi=request.points[PointsType.PRESYN],
                                                                       syn_file=f,
@@ -174,12 +197,13 @@ class Hdf5Source(BatchProvider):
         presyn_node_ids  = syn_file['annotations/presynaptic_site/partners'][:, 0].tolist()
         postsyn_node_ids = syn_file['annotations/presynaptic_site/partners'][:, 1].tolist()
 
+        logging.debug('adding global offset to points %i %i %i' % (dataset_offset[0],
+                                                                   dataset_offset[1], dataset_offset[2]))
+
         for node_nr, node_id in enumerate(syn_file['annotations/ids']):
             location     = syn_file['annotations/locations'][node_nr]
             location /= self.resolutions[VolumeType.RAW]
             if dataset_offset is not None:
-                logging.debug('adding global offset to points %i %i %i' %(dataset_offset[0],
-                                                                          dataset_offset[1], dataset_offset[2]))
                 location += dataset_offset
 
 
