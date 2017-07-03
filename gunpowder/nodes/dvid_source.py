@@ -115,7 +115,10 @@ class DvidSource(BatchProvider):
                 assert request.points[PointsType.PRESYN] == request.points[PointsType.POSTSYN]
             except:
                 assert PointsType.PRESYN not in request.points or PointsType.POSTSYN not in request.points
-            presyn_points, postsyn_points = self.__read_syn_points(roi=request.points[PointsType.PRESYN])
+            if PointsType.PRESYN in request.points:
+                presyn_points, postsyn_points = self.__read_syn_points(roi=request.points[PointsType.PRESYN])
+            elif PointsType.POSTSYN in request.points:
+                presyn_points, postsyn_points = self.__read_syn_points(roi=request.points[PointsType.POSTSYN])
 
         for (points_type, roi) in request.points.items():
             # check if requested pointstype can be provided
@@ -208,16 +211,27 @@ class DvidSource(BatchProvider):
             kind        = str(node['Kind'])
             location    = np.asarray((node['Pos'][2], node['Pos'][1], node['Pos'][0]))
             location_id = int(node_nr)
-            syn_id      = int(node['Tags'][0][3:])
+            # some synapses are wrongly annotated in dvid source, have 'Tag': null ???, they are skipped
+            try:
+                syn_id = int(node['Tags'][0][3:])
+            except:
+                continue
             location_to_location_id_dict[str(location)] = location_id
 
             partner_locations = []
-            for relation in node['Rels']:
-                partner_locations.append(np.asarray([relation['To'][2], relation['To'][1], relation['To'][0]]))
+            try:
+                for relation in node['Rels']:
+                    partner_locations.append(np.asarray([relation['To'][2], relation['To'][1], relation['To'][0]]))
+            except:
+                partner_locations = []
             location_id_to_partner_locations[int(node_nr)] = partner_locations
 
-            props = {'conf':   float(node['Prop']['conf']), 'agent':  str(node['Prop']['agent'])}
             # check if property given, not always given
+            props = {}
+            if 'conf' in node['Prop']:
+                props['conf'] = float(node['Prop']['conf'])
+            if 'agent' in node['Prop']:
+                props['agent']  = str(node['Prop']['agent'])
             if 'flagged' in node['Prop']:
                 str_value_flagged = str(node['Prop']['flagged'])
                 props['flagged']  = bool(distutils.util.strtobool(str_value_flagged))

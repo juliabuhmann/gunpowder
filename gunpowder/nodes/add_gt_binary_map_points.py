@@ -4,16 +4,23 @@ import numpy as np
 from scipy import ndimage
 
 from .batch_filter import BatchFilter
+from gunpowder.coordinate import Coordinate
 from gunpowder.volume import Volume, VolumeType
 from gunpowder.points import PointsType
+
 
 logger = logging.getLogger(__name__)
 
 class AddGtBinaryMapOfPoints(BatchFilter):
-
+    ''' Create binary map for points of given PointsType in batch and add it as volume to batch '''
     def __init__(self, pointstype_to_volumetypes):
+        ''' Add binary map of given PointsType as volume to batch.
+        Args:
+           pointstype_to_volumetypes: dict, e.g. {PointsType.PRESYN: VolumeType.GT_BM_PRESYN} creates a binary map
+                                      of points in PointsType.PRESYN and adds the created binary map
+                                      as a volume of type VolumeType.GT_BM_PRESYN to the batch if requested. 
+        '''
         self.pointstype_to_volumetypes = pointstype_to_volumetypes
-
         self.skip_next = False
 
 
@@ -71,25 +78,8 @@ class AddGtBinaryMapOfPoints(BatchFilter):
                                                 resolution = batch.volumes[VolumeType.RAW].resolution,
                                                 interpolate=interpolate)
 
-
-    def __is_inside(self, location, shape, offset, margin=0):
-        try:
-            assert len(margin) == len(shape)
-        except:
-            margin = (margin,) * len(shape)
-
-        inside_bb = True
-        location = np.asarray(location) - np.asarray(offset)
-        for dim, size in enumerate(shape):
-            if location[dim] < margin[dim]:
-                inside_bb = False
-            if location[dim] >= size - margin[dim]:
-                inside_bb = False
-        return inside_bb
-
-
     def __get_binary_map(self, batch, request, points_type, volume_type, pointsoftype, marker='gaussian'):
-        """ requires given point locations to be relative to current bounding box already, because offset of batch is wrong"""
+        """ requires given point locations to lie within to current bounding box already, because offset of batch is wrong"""
 
         shape_bm_volume  = request.volumes[volume_type].get_shape()
         offset_bm_volume = request.volumes[volume_type].get_offset()
@@ -97,12 +87,20 @@ class AddGtBinaryMapOfPoints(BatchFilter):
 
         for loc_id in pointsoftype.data.keys():
             # check if location lies inside bounding box
-            if self.__is_inside(location=batch.points[points_type].data[loc_id].location, shape=shape_bm_volume, offset=offset_bm_volume):
-                shifted_current_loc = batch.points[points_type].data[loc_id].location - np.asarray(offset_bm_volume)
-                marker_size = 2
-                binary_map[shifted_current_loc[0]-marker_size:shifted_current_loc[0]+marker_size,
-                            shifted_current_loc[1]-marker_size:shifted_current_loc[1]+marker_size,
-                            shifted_current_loc[2]-marker_size:shifted_current_loc[2]+marker_size] = 255
+            if request.volumes[volume_type].contains(Coordinate(batch.points[points_type].data[loc_id].location)):
+                shifted_loc = batch.points[points_type].data[loc_id].location - np.asarray(offset_bm_volume)
+                if marker == 'point':
+                    binary_map[[[loc] for loc in shifted_loc]] = 1
+                elif marker == 'gaussian':
+                    marker_size = 1
+                    marker_locs = tuple( slice( max(0, shifted_loc[dim] - marker_size),
+                                                min(shape_bm_volume[dim], shifted_loc[dim] + marker_size))
+                                                for dim in range(len(shape_bm_volume)))
+                    # set to 255 to keep binary map as uint8. That is beneficial to get 'roundish' blob around locations
+                    # as smallest values which are produced by gaussian filtering are then set to zero instead of a very small float
+                    # resulting in a binary map which is OFF at those locations instead of ON.
+                    binary_map[marker_locs] = 255
+
 
         # return mask where location is marked as a single point
         if marker == 'point':
@@ -112,9 +110,10 @@ class AddGtBinaryMapOfPoints(BatchFilter):
         elif marker == 'gaussian':
             binary_map = ndimage.filters.gaussian_filter(binary_map, sigma=1.)
             binary_map_gaussian = np.zeros_like(binary_map, dtype='uint8')
-            binary_map_gaussian[np.nonzero(binary_map)] = 255
+            binary_map_gaussian[np.nonzero(binary_map)] = 1
 
             # from scipy import ndimage
             # binary_map_gaussian = (ndimage.morphology.binary_dilation(binary_map, iterations=5)*255.).astype('uint8')
 
             return binary_map_gaussian
+
